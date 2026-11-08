@@ -117,21 +117,20 @@ class MainActivity : Activity() {
                 JSONObject().put("id", it.first).put("name", it.second).put("size", it.third).toString()
             } ?: ""
 
+        // Abre la cámara de Samsung y deja la barra de Virtual 360 flotando encima, siempre visible
         @JavascriptInterface fun openCamera() = runOnUiThread {
+            if (!Settings.canDrawOverlays(this@MainActivity)) {
+                toast("Activa «Mostrar sobre otras apps» para VirtualTécnica Cam, vuelve y pulsa de nuevo el botón.")
+                startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                return@runOnUiThread
+            }
+            ContextCompat.startForegroundService(this@MainActivity, Intent(this@MainActivity, OverlayService::class.java))
             val i = packageManager.getLaunchIntentForPackage("com.sec.android.app.camera")
                 ?: Intent(MediaStore.INTENT_ACTION_VIDEO_CAMERA)
             startActivity(i)
         }
 
-        @JavascriptInterface fun startBubble() = runOnUiThread {
-            if (!Settings.canDrawOverlays(this@MainActivity)) {
-                toast("Activa «Mostrar sobre otras apps» para VirtualTécnica Cam y vuelve a pulsar el botón.")
-                startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
-            } else {
-                ContextCompat.startForegroundService(this@MainActivity, Intent(this@MainActivity, OverlayService::class.java))
-                openCamera()
-            }
-        }
+        @JavascriptInterface fun startBubble() = openCamera()
 
         // Minimizar: deja una barra flotante arriba con los botones y manda la app al fondo
         @JavascriptInterface fun setMini(m: Boolean) = runOnUiThread {
@@ -167,3 +166,14 @@ class MainActivity : Activity() {
         }
     }
 }
+
+ 
+      
+          
+           
+           
+           
+   
+        
+           
+            
