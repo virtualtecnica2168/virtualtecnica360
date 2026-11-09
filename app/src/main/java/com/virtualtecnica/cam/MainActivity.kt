@@ -15,6 +15,7 @@ import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.webkit.WebViewAssetLoader
 import org.json.JSONObject
+import java.io.InputStream
 import java.io.OutputStream
 
 class MainActivity : Activity() {
@@ -49,10 +50,7 @@ class MainActivity : Activity() {
                 val u = request.url
                 if (u.host == "appassets.androidplatform.net" && u.path == "/latest.mp4") {
                     val id = u.getQueryParameter("id")?.toLongOrNull() ?: return null
-                    return try {
-                        WebResourceResponse("video/mp4", null, 200, "OK",
-                            mapOf("Access-Control-Allow-Origin" to "*"), contentResolver.openInputStream(Media.uri(id)))
-                    } catch (e: Exception) { null }
+                    return try { videoResponse(id, request.requestHeaders["Range"]) } catch (e: Exception) { null }
                 }
                 return loader.shouldInterceptRequest(u)
             }
@@ -106,6 +104,35 @@ class MainActivity : Activity() {
         if (!loaded) return
         val l = Media.latest(this) ?: return
         if (l.first != seen) { seen = l.first; js("window.onNuevoVideo&&onNuevoVideo()") }
+    }
+
+    private class Limited(private val i: InputStream, private var left: Long) : InputStream() {
+        override fun read(): Int { if (left <= 0) return -1; val r = i.read(); if (r >= 0) left--; return r }
+        override fun read(b: ByteArray, o: Int, l: Int): Int {
+            if (left <= 0) return -1
+            val r = i.read(b, o, minOf(l.toLong(), left).toInt()); if (r > 0) left -= r; return r
+        }
+        override fun close() = i.close()
+    }
+
+    // Entrega el video por partes (rangos) para poder saltar a cualquier instante sin cargarlo entero en memoria
+    private fun videoResponse(id: Long, range: String?): WebResourceResponse {
+        val afd = contentResolver.openAssetFileDescriptor(Media.uri(id), "r")!!
+        val len = afd.length
+        var start = 0L; var end = len - 1
+        val m = range?.let { Regex("bytes=(\\d*)-(\\d*)").find(it) }
+        if (m != null) {
+            val a = m.groupValues[1]; val b = m.groupValues[2]
+            if (a.isNotEmpty()) { start = a.toLong(); if (b.isNotEmpty()) end = minOf(b.toLong(), len - 1) }
+            else if (b.isNotEmpty()) start = maxOf(0L, len - b.toLong())
+        }
+        val fis = afd.createInputStream()
+        fis.channel.position(afd.startOffset + start)
+        val h = mutableMapOf("Accept-Ranges" to "bytes", "Content-Length" to (end - start + 1).toString(),
+            "Access-Control-Allow-Origin" to "*")
+        if (range != null) h["Content-Range"] = "bytes $start-$end/$len"
+        return WebResourceResponse("video/mp4", null, if (range != null) 206 else 200,
+            if (range != null) "Partial Content" else "OK", h, Limited(fis, end - start + 1))
     }
 
     private fun js(code: String) { web.post { web.evaluateJavascript(code, null) } }
@@ -166,14 +193,3 @@ class MainActivity : Activity() {
         }
     }
 }
-
- 
-      
-          
-           
-           
-           
-   
-        
-           
-            

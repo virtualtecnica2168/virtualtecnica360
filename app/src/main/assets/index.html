@@ -176,6 +176,7 @@ body.mini #msg{font-size:.78rem}
 <div class="row"><label class="f">Tamaño del video<select id="qres"><option value="720">720p (como antes)</option><option value="1080">1080p (más pesado)</option></select></label><label class="f">Cuadros por segundo<select id="fps"><option value="30">30 (como antes)</option><option value="60">60 (más pesado)</option></select></label></div>
 <label class="f">Compresión (Mbps). Más alto = más calidad y más peso<input type="number" id="mbps" min="1" max="30" step="1"></label>
 <p class="hint">Los valores iniciales (720p, 30 cuadros y 6 Mbps) son los de antes. Si se traba o se entrecorta, vuelve a ellos. Se guardan para la próxima vez.</p>
+<label class="row hint"><input type="checkbox" id="offl" checked> Exportar en alta calidad (cuadro por cuadro): tarda más que el video, pero no se traba. Usa el tamaño completo del formato (1080 de ancho) y mínimo 12 Mbps.</label>
 </section>
 <section class="panel">
 <h2>Control remoto</h2>
@@ -311,6 +312,7 @@ function draw(){
   if(frameImg)ctx.drawImage(frameImg,0,0,W,H);else quickFrame(W,H);
 }
 function tick(now){
+  if(window.EXPORTING){requestAnimationFrame(tick);return}
   if(seqMode()){seqStep(now)}
   else if(v.readyState>=2&&boom()){
     const d=v.duration,e=(now-t0)/1000*spd(),p=e%(2*d),pos=p<d?p:2*d-p;
@@ -506,7 +508,7 @@ function emoSpr(s,hue,rq){
   });
 }
 function drawBubbles(W,H){
-  const now=performance.now(),dt=Math.min(.1,(now-bt)/1000),k=W/720,t=now/1000;bt=now;
+  const now=(window.VT!=null?window.VT:performance.now()),dt=Math.min(.1,(now-bt)/1000),k=W/720,t=now/1000;bt=now;
   if(bw!==W){bl=[];bw=W}
   while(bl.length<BB.n)bl.push(nb(W,H,true));
   if(bl.length>BB.n)bl.length=BB.n;
@@ -823,7 +825,7 @@ $('rap').onclick=rolApply;
 $('ctlsal').onclick=()=>{$('rrol').value='off';rolApply()};
 try{const q=JSON.parse(localStorage.getItem('cab360ro')||'null');if(q&&q.rol){$('rrol').value=q.rol;$('rcan').value=q.canal||'';rolApply()}}catch(e){}
 async function startRec(){
-  try{await startRec0()}
+  try{if(!(await exportOffline()))await startRec0()}
   catch(e){recording=false;try{v.onended=null;aud.pause()}catch(e2){}$('go').disabled=false;$('go').textContent='Crear video con marco';msg('❌ No se pudo iniciar la grabación: '+((e&&e.message)||e)+'. Prueba en Chrome o baja Tamaño y Cuadros por segundo en Ajustes.')}
 }
 $('go').onclick=startRec;
@@ -840,6 +842,83 @@ $('dl').onclick=async()=>{
     const a=document.createElement('a');a.href=URL.createObjectURL(blobOut);a.download=name;document.body.appendChild(a);a.click();a.remove();
   }
 };
+/* ===== Exportación en alta calidad, cuadro por cuadro (WebCodecs) ===== */
+window.EXPORTING=false;window.VT=null;
+try{$('offl').checked=localStorage.getItem('cab360o')!=='0';$('offl').onchange=()=>localStorage.setItem('cab360o',$('offl').checked?'1':'0')}catch(e){}
+const wait=ms=>new Promise(r=>setTimeout(r,ms));
+function loadMuxer(){return new Promise(res=>{
+  if(window.Mp4Muxer)return res(true);
+  const sc=document.createElement('script');sc.src='https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/build/mp4-muxer.min.js';
+  sc.onload=()=>res(!!window.Mp4Muxer);sc.onerror=()=>res(false);document.head.appendChild(sc)})}
+setTimeout(loadMuxer,2000);
+function seekTo(t){return new Promise(res=>{
+  if(Math.abs(v.currentTime-t)<1e-3){res();return}
+  let done=false;const f=()=>{if(done)return;done=true;v.removeEventListener('seeked',f);res()};
+  v.addEventListener('seeked',f);setTimeout(f,5000);v.currentTime=t})}
+async function exportOffline(){
+  if(window.EXPORTING||recording)return true;
+  if(!$('offl').checked||!window.VideoEncoder||!window.VideoFrame)return false;
+  if(!v.videoWidth){msg('Primero elige el video del giro.');return true}
+  if(!$('evn').value.trim()){msg('Escribe primero el nombre del evento.');$('evn').focus();return true}
+  if(seqMode()&&!plan().ok){msg('No alcanza el video para esta mezcla con esas duraciones. Toca "Ajustar duraciones al video" o baja los valores.');$('sum').scrollIntoView({block:'center'});return true}
+  if(!(await loadMuxer()))return false;
+  const d=v.duration,useMus=hasMus&&$('usemus').checked;
+  let tot,srcAt;
+  if(seqMode()){
+    const P=plan();tab(P);tot=P.tot;
+    srcAt=T=>{let i=0;while(i<P.segs.length-1&&P.cum[i+1]<=T)i++;const g=P.segs[i],u=uAt(P,i,T-P.cum[i]);return g.rev?g.b-u*g.L:g.a+u*g.L};
+  }else if(boom()){tot=2*d/spd();srcAt=T=>{const e=T*spd(),p=e%(2*d);return p<d?p:2*d-p}}
+  else{tot=d/spd();srcAt=T=>T*spd()}
+  const [W0,H0]=SIZES[$('fmt').value],W=Math.round(W0/2)*2,H=Math.round(H0/2)*2,fps=Q.fps,mbps=Math.max(12,Q.mbps);
+  let vc=null;
+  for(const c of (fps>30?['avc1.64002A','avc1.4D402A']:['avc1.640028','avc1.4D4028'])){
+    const cfg={codec:c,width:W,height:H,bitrate:mbps*1e6,framerate:fps};
+    try{if((await VideoEncoder.isConfigSupported(cfg)).supported){vc=cfg;break}}catch(e){}
+  }
+  if(!vc)return false;
+  const acfg=useMus?{codec:'mp4a.40.2',sampleRate:48000,numberOfChannels:2,bitrate:128000}:null;
+  if(acfg){try{if(!window.AudioEncoder||!(await AudioEncoder.isConfigSupported(acfg)).supported)return false}catch(e){return false}}
+
+  const prev=[cv.width,cv.height];let err=null,ok=false;
+  window.EXPORTING=true;recording=true;$('go').disabled=true;$('go').textContent='Exportando…';
+  try{
+    v.pause();aud.pause();msg('Exportando en alta calidad… 0%');
+    const M=window.Mp4Muxer,muxer=new M.Muxer({target:new M.ArrayBufferTarget(),video:{codec:'avc',width:W,height:H},...(acfg?{audio:{codec:'aac',numberOfChannels:2,sampleRate:48000}}:{}),fastStart:'in-memory'});
+    if(acfg){
+      const buf=await ac.decodeAudioData(await (await fetch(aud.src)).arrayBuffer());
+      const n=Math.ceil(tot*48000),oc=new OfflineAudioContext(2,n,48000),sr=oc.createBufferSource();
+      sr.buffer=buf;sr.loop=true;sr.connect(oc.destination);sr.start(0);
+      const out=await oc.startRendering(),aenc=new AudioEncoder({output:(c,m)=>muxer.addAudioChunk(c,m),error:e=>{err=e}});
+      aenc.configure(acfg);
+      for(let o=0;o<n;o+=48000){
+        const len=Math.min(48000,n-o),data=new Float32Array(len*2);
+        data.set(out.getChannelData(0).subarray(o,o+len),0);data.set(out.getChannelData(1).subarray(o,o+len),len);
+        const ad=new AudioData({format:'f32-planar',sampleRate:48000,numberOfFrames:len,numberOfChannels:2,timestamp:Math.round(o/48000*1e6),data});
+        aenc.encode(ad);ad.close();
+      }
+      await aenc.flush();aenc.close();
+    }
+    const venc=new VideoEncoder({output:(c,m)=>muxer.addVideoChunk(c,m),error:e=>{err=e}});venc.configure(vc);
+    cv.width=W;cv.height=H;ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';bl=[];bw=0;
+    const N=Math.max(1,Math.round(tot*fps)),vt0=performance.now();bt=vt0;
+    for(let n=0;n<N&&!err;n++){
+      await seekTo(Math.min(d-.05,Math.max(0,srcAt(n/fps))));
+      window.VT=vt0+n*1000/fps;draw();
+      const fr=new VideoFrame(cv,{timestamp:Math.round(n*1e6/fps),duration:Math.round(1e6/fps)});
+      venc.encode(fr,{keyFrame:n%(fps*2)===0});fr.close();
+      while(venc.encodeQueueSize>6&&!err)await wait(5);
+      if(n%3===0){msg('Exportando en alta calidad… '+Math.round(100*n/N)+'%');await wait(0)}
+    }
+    if(err)throw err;
+    await venc.flush();venc.close();muxer.finalize();
+    chunks=[new Blob([muxer.target.buffer],{type:'video/mp4'})];ok=true;
+  }catch(e){err=e}
+  window.VT=null;window.EXPORTING=false;recording=false;cv.width=prev[0];cv.height=prev[1];setSize();apply();
+  if(ok){finish('video/mp4');return true}
+  $('go').disabled=false;$('go').textContent='Crear video con marco';
+  msg('⚠ La exportación en alta calidad falló ('+((err&&err.message)||err)+'). Uso el método anterior…');
+  return false;
+}
 /* ===== Integración con la app Android ===== */
 $('shwa').onclick=()=>{const u='https://wa.me/?text='+encodeURIComponent('Tu video del Giro 360 está aquí, míralo y descárgalo: '+linkOut);window.Android?Android.openUrl(u):window.open(u,'_blank')};
 async function guardarNativo(b,name){
@@ -861,10 +940,13 @@ if(window.Android){
       const i=JSON.parse(Android.latestVideo()||'null');
       if(!i){msg('No hay videos en la cámara (carpeta DCIM).');return}
       msg('Leyendo '+i.name+'…');
-      const r=await fetch('/latest.mp4?id='+i.id),b=await r.blob();
-      v.onloadeddata=apply;const ld=new Promise(r=>{v.addEventListener('loadeddata',r,{once:true});setTimeout(r,8000)});
-      v.src=URL.createObjectURL(b);$('vname').textContent=i.name;$('out').style.display='none';
-      msg('Video cargado: '+i.name+'. Pulsa Crear video con marco.');await ld;
+      const url='/latest.mp4?id='+i.id;
+      const waitV=ms=>new Promise(r=>{const ok=()=>{c();r(true)},ko=()=>{c();r(false)},c=()=>{v.removeEventListener('loadeddata',ok);v.removeEventListener('error',ko);clearTimeout(tm)};const tm=setTimeout(ko,ms);v.addEventListener('loadeddata',ok);v.addEventListener('error',ko)});
+      v.onloadeddata=apply;v.src=url;
+      let okv=await waitV(12000);
+      if(!okv){msg('Cargando el video en memoria…');const b=await (await fetch(url)).blob();v.src=URL.createObjectURL(b);okv=await waitV(20000)}
+      $('vname').textContent=i.name;$('out').style.display='none';
+      msg(okv?'Video cargado: '+i.name+'. Pulsa Crear video con marco.':'❌ No se pudo leer el video.');
     }catch(e){msg('❌ No se pudo leer el video: '+e.message)}
   };
   window.onNuevoVideo=window.cargarUltimo;
